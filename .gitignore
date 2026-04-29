@@ -1,0 +1,30 @@
+# --- Python Specific ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# --- Data & Large Files (Security & Storage) ---
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+*.csv
+*.json
+*.parquet
+
+# --- PyTorch & Model Weights ---
+*.pth
+*.pt
+*.ckpt
+models/checkpoint/
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+.DS_Store
+.vscode/
+.idea/
+*.log
