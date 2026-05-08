@@ -17,6 +17,7 @@ class Dataset:
         self.start_date = start_date.strftime("%Y-%m-%d")
         self.end_dt = end_date
         self.end_date = end_date.strftime("%Y-%m-%d")
+        self.files = []
 
     def download_csvs(self):
         timespans = ["hour", "day", "week", "month"]
@@ -33,19 +34,21 @@ class Dataset:
 
             # Download csv if not present
             if os.path.isfile(filepath):
-                print(f"'data/raw/{filename}' already present, skipping!\n")
+                print(f"'{filepath}' already present, skipping!\n")
             else:       
                 self.get_prices(timespan)
+
+            self.files.append(filepath)
 
         print(f"----------Downloading {self.ticker} news----------")
         filename = f"{self.ticker}_news_{self.start_date}_{self.end_date}.csv"
         filepath = os.path.join("data/raw", filename)
 
         if os.path.isfile(filepath):
-            print(f"'data/raw/{filename}' already present, skipping!\n")
+            print(f"'{filepath}' already present, skipping!\n")
         else:
             self.get_news()
-
+        self.files.append(filepath)
 
     def get_prices(self, timespan: str):
         api_key = os.getenv("API_KEY")
@@ -206,7 +209,7 @@ class Dataset:
     def generate_training_dataset(
             self, start_dt: datetime, end_dt: datetime, 
             hourly_lookback_days: int, daily_bars: int, weekly_bars: int, monthly_bars: int, 
-            max_news_per_hr: int, label: str):
+            max_news_per_hr: int, label: str, normalize_datasets: bool = True):
         
         print(f"----------Generating {self.ticker} dataset for {start_dt}:{end_dt}----------")
 
@@ -237,11 +240,23 @@ class Dataset:
                 raise ValueError(f"./data/raw/{name}.csv not present! Invoke download_csvs() to fetch prices/news")
 
 
-        print("Sorting csvs", end='', flush=True)
+        print("Sorting and normalizing datasets", end='', flush=True)
         for name in datasets.keys():
             df = datasets[name].set_index("eastern_dt")
             df.index = pd.to_datetime(df.index, utc=True).tz_convert("US/Eastern")
             df = df.sort_index()
+
+            if normalize_datasets and "news" not in name:
+                close = df["close"].copy()
+                for col in ["open", "high", "low", "close", "vwap"]:
+                    df[col] = np.log(df[col] / close.shift(1))
+                    print(".", end='', flush=True)
+                for col in ["volume", "transactions"]:
+                    df[col] = np.log(df[col] + 1)
+                    print(".", end='', flush=True)
+                df["raw_close"] = close
+                df = df.dropna()
+                
             datasets[name] = df
             print(".", end='', flush=True)
         
@@ -258,7 +273,7 @@ class Dataset:
         mkt_days = mkt_cal.get_calendar("NYSE").valid_days(start_date=self.start_dt, end_date=end_dt)   # nyse mkt days
         mkt_days = mkt_days.tz_localize(None).tz_localize("US/Eastern").to_list()
 
-        print("Processing rows...",)
+        print("\nProcessing rows...",)
         rows = []
         skipped_rows = 0
         start_dt = pd.Timestamp(start_dt).tz_localize("US/Eastern")
@@ -396,8 +411,8 @@ class Dataset:
                     skipped_rows += 1
                     continue
 
-                closing_price = day_bar.iloc[0]["close"]
-                next_day_price = next_day_bar.iloc[0]["close"]
+                closing_price = day_bar.iloc[0]["raw_close"]
+                next_day_price = next_day_bar.iloc[0]["raw_close"]
 
                 row["target"] = 1 if next_day_price > closing_price else 0
             else:
