@@ -423,6 +423,8 @@ class Dataset:
 
         print(f"Success: {filepath}!")
 
+        return label
+
 
                 
 
