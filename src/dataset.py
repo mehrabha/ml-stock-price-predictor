@@ -362,7 +362,7 @@ class Dataset:
                 if len(news_hour) >= max_news_per_hr * 2:
                     news_hour = news_hour.sample(n=max_news_per_hr * 2)
 
-                news.append({"count": news_hour_count, "samples": news_hour.to_dict("records")})    # save as (total count, sampled)
+                news.append({"timestamp": start, "count": news_hour_count, "samples": news_hour.to_dict("records")})    # save as (total count, sampled)
                 
                 start = start.replace(hour=start.hour + 2)
                 if start.hour >= 19:
@@ -385,8 +385,11 @@ class Dataset:
                 saturday_news = saturday_news.sample(n=max_news_per_hr * 2)     # using hourly rate for weekends to keep things proportional
             if len(sunday_news) > max_news_per_hr * 2:
                 sunday_news = sunday_news.sample(n=max_news_per_hr * 2)     # weird rate but keeps things proportional
-            news.append({"count": saturday_count, "samples": saturday_news.to_dict("records")})
-            news.append({"count": sunday_count, "samples": sunday_news.to_dict("records")})
+            news.append({"timestamp": saturday_dt, "count": saturday_count, "samples": saturday_news.to_dict("records")})
+            news.append({"timestamp": sunday_dt, "count": sunday_count, "samples": sunday_news.to_dict("records")})
+
+            # sort by timstamp
+            news.sort(key=lambda x: x["timestamp"])
 
             if len(news) != 8:
                 print(f"Exception, expected 8 objects in news array, found {len(news)}! {mkt_dt}...")
