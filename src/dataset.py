@@ -422,9 +422,10 @@ class Dataset:
                 # guess 1 to handle edge case, should be a one time thing
                 row["target"] = 1
         
-            if len(row) != 7:
-                print(f"Exception, expected 7 elements in row, found {len(row)}! Aborting...")
-                return
+            # add some additional useful params and save
+            row["params"] = [mkt_dt.dayofweek, mkt_dt.day, mkt_dt.month, mkt_dt.quarter]
+            if len(row) != 8:
+                raise Exception(f"Exception, expected 8 elements in row, found {len(row)}! Aborting...")
             rows.append(row)
         
         print(f"Extracted {len(rows)} rows! Skipped {skipped_rows} rows")
