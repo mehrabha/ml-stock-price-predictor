@@ -46,7 +46,6 @@ class AlphaTrader(nn.Module):
         )
     
     def forward(self, hours: torch.Tensor, macros: torch.Tensor, news: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
-
         invalid = (
             hours.size(1) != 7 or                       # Checks feature depth (Open, High, Low...)
             hours.size(2) != self.hourly_bars or        # Checks timeline length (47)
@@ -66,5 +65,7 @@ class AlphaTrader(nn.Module):
 
         combined = torch.cat((p_out, m_out, n_out, params), dim=1)
 
-        # get final classification
+        # get final output
         return self.fusion(combined)
+    
+    

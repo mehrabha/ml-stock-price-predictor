@@ -31,7 +31,7 @@ class AlphaTraderDataset(Dataset):
         news_semantics = []
         for news in row["news"]:    
             # there should be 8 of them, save the embeddings + extra info as 386d vectors
-            semantics = news["semantics"].tolist()
+            semantics = news["semantics"]
             semantics.append(news["count"])     
             semantics.append(news["samples"])
             news_semantics.append(semantics)
@@ -45,7 +45,7 @@ class AlphaTraderDataset(Dataset):
 
         # 5. Package
         return {
-            'hours': torch.tensor(prices_mtx, dtype=torch.float32),
+            'hours': torch.tensor(prices_mtx, dtype=torch.float32).transpose(0, 1),     # transpose to 7x57
             'macros': torch.tensor(macros_array, dtype=torch.float32),
             'news': torch.tensor(news_mtx, dtype=torch.float32),
             'params': torch.tensor(params_array, dtype=torch.float32),

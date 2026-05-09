@@ -22,7 +22,7 @@ class Trainer:
 
         print(f"Trainer initialized! GPU: {self.device}")
 
-
+        
     def train(self) -> float:
         self.model.train()
         running_loss = 0.0
