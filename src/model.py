@@ -17,7 +17,7 @@ class AlphaTrader(nn.Module):
             nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1),   # deep feature extractions
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * hourly_bars // 2, 64)  # compress to a dense array of 64 numbers
+            nn.Linear(64 * (hourly_bars // 2), 64)  # compress to a dense array of 64 numbers
         )
 
         # BRANCH 2: Capture long term prices

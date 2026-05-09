@@ -31,13 +31,11 @@ class AlphaTraderDataset(Dataset):
         news_semantics = []
         for news in row["news"]:    
             # there should be 8 of them, save the embeddings + extra info as 386d vectors
-            semantics = news["semantics"]
-            semantics.append(news["count"])     
-            semantics.append(news["samples"])
+            semantics = [float(news["count"]), float(news["samples"])] + news["semantics"].tolist()
             news_semantics.append(semantics)
 
         #convert to numpy/tensors
-        prices_mtx = np.array(prices) 
+        prices_mtx = np.array(prices)
         macros_array = np.array(macros)
         news_mtx = np.array(news_semantics)
         params_array = np.array(row["params"])

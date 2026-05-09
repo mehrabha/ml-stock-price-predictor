@@ -6,12 +6,10 @@ import numpy as np
 import time
 from torch.utils.data import DataLoader
 
-from dataset import Dataset
-from model_dataset import AlphaTraderDataset
-from model import AlphaTrader
-from train import Trainer
-
-
+from src.dataset import Dataset
+from src.model_dataset import AlphaTraderDataset
+from src.model import AlphaTrader
+from src.train import Trainer
 
 
 load_dotenv()
@@ -59,8 +57,8 @@ def main():
 
     # --- 2. PREPARE TRAINING SET ---
     training_start_dt = datetime(2024, 10, 1)
-    training_end_dt = datetime(2025, 12, 31)
-    val_start_dt = datetime(2026, 1, 1)
+    training_end_dt = datetime(2025, 10, 31)
+    val_start_dt = datetime(2025, 11, 1)
     val_end_dt = datetime(2026, 4, 30)
 
 
