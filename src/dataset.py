@@ -211,7 +211,7 @@ class Dataset:
             hourly_lookback_days: int, daily_bars: int, weekly_bars: int, monthly_bars: int, 
             max_news_per_hr: int, label: str, normalize_datasets: bool = True):
         
-        print(f"----------Generating {self.ticker} dataset for {start_dt}:{end_dt}----------")
+        print(f"\n----------Generating {self.ticker} dataset for {start_dt}:{end_dt}----------")
 
         if start_dt < self.start_dt:
             raise ValueError(f"Provided start date{start_dt} preceeds available training data!")
