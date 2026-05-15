@@ -414,8 +414,8 @@ class Dataset:
                     skipped_rows += 1
                     continue
 
-                closing_price = day_bar.iloc[0]["raw_close"]
-                next_day_price = next_day_bar.iloc[0]["raw_close"]
+                closing_price = day_bar.iloc[0]["raw_close"] if normalize_datasets else day_bar.iloc[0]["close"]
+                next_day_price = next_day_bar.iloc[0]["raw_close"] if normalize_datasets else next_day_bar.iloc[0]["close"]
 
                 row["target"] = 1 if next_day_price > closing_price else 0
             else:
