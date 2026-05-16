@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import numpy as np
+import os
 
 class Trainer:
     def __init__(self, model: nn.Module, train_loader:DataLoader, val_loader: DataLoader, device: str = "cuda"):
@@ -104,7 +104,8 @@ class Trainer:
             return epoch_loss, epoch_acc, baseline_acc
         
 
-    def fit(self, epochs: int, save_path: str = "alpha_trader.pth"):
+    def fit(self, epochs: int, tag: str = "alpha_trader.pth"):
+        os.makedirs("models", exist_ok=True)
         print(f"Starting training on device: {self.device}")
         
         for epoch in range(epochs):
@@ -119,6 +120,6 @@ class Trainer:
             # Checkpoint: Only save model if it actually improved
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                torch.save(self.model.state_dict(), save_path)
-                print(f"New best model saved! {save_path}")
+                torch.save(self.model.state_dict(), "models/" + tag)
+                print(f"New best model saved! {"models/" + tag}")
                 print(f"Val Loss: {val_loss:.4f}")

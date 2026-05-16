@@ -5,20 +5,9 @@ __pycache__/
 venv/
 .env
 
-# --- Data & Large Files (Security & Storage) ---
-data/raw/*
-data/processed/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-*.csv
-*.json
-*.parquet
-
-# --- PyTorch & Model Weights ---
-*.pth
-*.pt
-*.ckpt
-models/checkpoint/
+# --- Data/Large Files ---
+models/
+data/
 
 # --- Jupyter Notebooks ---
 .ipynb_checkpoints
