@@ -10,6 +10,7 @@ from src.dataset import Dataset
 from src.model_dataset import AlphaTraderDataset
 from src.model import AlphaTrader
 from src.train import Trainer
+from src.llm_trader import LLMStockTrader
 
 
 load_dotenv()
@@ -57,20 +58,35 @@ def main():
 
     # train and validate price predictor using csvs
     # following params should be set based on available data, otherwise will result in index wrap arounds/exceptions
-    price_predictor(d, 
-        training_start_dt=datetime(2024, 9, 1),
-        training_end_dt=datetime(2025, 8, 31),
-        val_start_dt=datetime(2025, 9, 1),
-        val_end_dt=datetime(2026, 4, 30),
-        hourly_lookback_days=5,
-        daily_bars=21, 
-        weekly_bars=13, 
-        monthly_bars=3, 
-        max_news_per_hr=3
-    )
+    # price_predictor(d, 
+    #     training_start_dt=datetime(2024, 9, 1),
+    #     training_end_dt=datetime(2025, 8, 31),
+    #     val_start_dt=datetime(2025, 9, 1),
+    #     val_end_dt=datetime(2026, 4, 30),
+    #     hourly_lookback_days=5,
+    #     daily_bars=21, 
+    #     weekly_bars=13, 
+    #     monthly_bars=3, 
+    #     max_news_per_hr=3
+    # )
 
     # validate llm trading agent
+    agent = LLMStockTrader(starting_balance=1015, max_trades_per_day=3)
+    context, current_price = agent.observe(
+        ticker="AAPL",
+        now = pd.Timestamp.now(tz="US/Eastern") - pd.DateOffset(days=3),
+        hourly_lookback_days=2,
+        daily_bars=10,
+        weekly_bars=6,
+        monthly_bars=4,
+        news_articles=4,
+        trade_history=20,
+        action_summaries=10
+    )
 
+    print(context + '\n')
+    decision = agent.reason(context,max_shares_per_trade=10)
+    print(decision)
 
 def price_predictor(d, training_start_dt, training_end_dt,
                     val_start_dt, val_end_dt,

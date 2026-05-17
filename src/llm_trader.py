@@ -3,32 +3,32 @@ from datetime import datetime
 import pandas as pd
 import pandas_market_calendars as mkt_cal
 import src.api_client as polygon_api
+import requests
 
 class LLMStockTrader:
     def __init__(self, starting_balance: int, max_trades_per_day=3):
         # Portfolio
         self.cash_balance = starting_balance
-        self.holdings = {}
-        self.trade_history = []
-        self.action_summaries = []
+        self.holdings = {"AAPL": 32}
+        self.trade_history = ["BUY AAPL 20", "BUY AAPL 12"]
+        self.action_summaries = ["Positive market sentiment, upward trend, and potential for growth driven by technology sector gains."]
 
         self.max_trades_per_day = max_trades_per_day
-        self.daily_trades_executed = 0
+        self.daily_trades_executed = 3
 
         self.llm_url = f"http://localhost:5000{os.getenv('BASE_PATH')}/chat"
         self.llm_auth = (os.getenv("APP_USER"), os.getenv('APP_PASS'))
 
 
     def observe(
-            self, ticker: str,
+            self, ticker: str, now: pd.Timestamp,
             hourly_lookback_days: int, daily_bars: int, 
             weekly_bars: int, monthly_bars: int, news_articles: int,
-            trade_history: int, trade_summaries: int):
+            trade_history: int, action_summaries: int) -> tuple[str, float]:
         """
         Step 1: Fetch live prices and news
         """
 
-        now = pd.Timestamp.now(tz="US/Eastern")
         end_date = now.strftime("%Y-%m-%d")
         print(f"[OBSERVE] Fetching latest prices and market events for {ticker}...")
 
@@ -59,7 +59,7 @@ class LLMStockTrader:
         if df_hour is not None and not df_hour.empty:
             df_hour = df_hour.set_index("eastern_dt")
             df_hour = df_hour.between_time("8:00", "18:00", inclusive="left")
-            df_hour.reset_index()
+            df_hour = df_hour.reset_index()
 
         if df_news is not None and not df_news.empty:
             df_news = df_news[["eastern_dt", "title", "publisher", "description"]].sort_values(by="eastern_dt")
@@ -73,7 +73,6 @@ class LLMStockTrader:
         md_day = df_day[cols].tail(daily_bars)
         md_week = df_week[cols].tail(weekly_bars)
         md_month = df_month[cols].tail(monthly_bars)
-
 
         # check if we were able to fetch the required data
         status = (
@@ -97,10 +96,12 @@ class LLMStockTrader:
         # construct the final context payload
         context = f"""
         **Current Market State for {ticker}**
+        - Current Price Per Share: {current_price}
         - Current Portfolio Cash: ${self.cash_balance:.2f}
         - Current Holdings (Shares): {self.holdings}
         - Trade History: {self.trade_history[-trade_history:] if len(self.trade_history) >= trade_history else self.trade_history}
-        - Previous Action Summaries: {self.action_summaries[-trade_summaries:] if len(self.action_summaries) >= self.action_summaries else self.action_summaries}
+        - Trades Executed Today: {self.daily_trades_executed}
+        - Previous Action Summaries: {self.action_summaries[-action_summaries:] if len(self.action_summaries) >= action_summaries else self.action_summaries}
         - Clock: {now}
 
         ### Recent News
@@ -120,3 +121,62 @@ class LLMStockTrader:
         """
         
         return context, current_price
+    
+
+    def reason(self, mkt_context: str, max_shares_per_trade:int) -> dict:
+        """
+        Step 2: Make decision using LLMs
+        """
+
+        print("[REASON] Analyzing market using DeepSeek R1...")
+
+
+        system_prompt = (
+            "You are an elite, purely logical quantitative AI used at a large firm. Your Goal: Maximize Returns while adhering to a medium-risk strategy! "
+            "You have access to the market and are able to execute trades based on cash position and portfolio. "
+            "Analyze the provided market data, news, and portfolio content to make investment decisions for the given ticker. "
+            "For your response, you must output a single, valid JSON object containing your final decision. "
+            "The JSON must strictly match this format (use double quotes): "
+            '{"action": "BUY | SELL | HOLD | ALERT", "ticker": "STRING | null", "shares": "INTEGER | null", "rationale": "STRING"} '
+            f"You may BUY or SELL up to {max_shares_per_trade} shares in a single transaction based on portfolio constraints. "
+            f"You have the ability to make decisions every hour while the market is open. However, you are allowed a maximum of {self.max_trades_per_day} trades per day. "
+            "Your 'rationale' field should be a 1-2 sentence justification to guide your future decisions. Discuss what you learned and justify your decision. "
+            "After your <think> reasoning process, output ONLY the valid JSON object. Do not wrap it in markdown formatting or provide conversational text. "
+            "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
+        )
+
+        payload = {
+            "system_prompt": system_prompt,
+            "prompt": mkt_context,
+            "temperature": 0.1
+        }
+
+        # Invoke the local LLM docker container
+        try:
+            response = requests.post(
+                self.llm_url,
+                json=payload,
+                auth=self.llm_auth,
+                timeout=float(os.getenv("LLM_TIMEOUT"))
+            )
+
+            response.raise_for_status()
+            response_json = response.json()
+
+            message = response_json["choices"][0]["message"]
+
+            final_content = message["content"].strip()
+            reasoning = message["reasoning_content"].strip()
+            usage = response_json["usage"]
+
+            print("[REASON] Success! Recieved decision from LLM...")
+
+            return {
+                "content": final_content,
+                "reasoning": reasoning,
+                "usage": usage
+            }
+        
+        except requests.exceptions.RequestException as e:
+            print(f"Error invoking LLM; exception={e}")
+            raise e

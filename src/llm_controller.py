@@ -90,7 +90,7 @@ async def chat(request: ChatRequest, user: str = Depends(authenticate)):
         try:
             resp = await http_client.post(LLM_URL, json=req_body)
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            return resp.json()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error invoking LLM: {e}")
 

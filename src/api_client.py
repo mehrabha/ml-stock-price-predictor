@@ -32,7 +32,6 @@ def get_prices(ticker: str, timespan: str, start_date: str, end_date: str) -> pd
     else:
         print(f"Download completed! {len(results)} rows")
     
-
     df = pd.DataFrame(results)
 
     # convert unix timestamps to US Eastern
