@@ -6,7 +6,7 @@ WORKDIR /app
 # Set environment variables for GPU optimization
 # These can be overridden at runtime if needed
 ENV LLAMA_ARG_N_GPU_LAYERS=99
-ENV LLAMA_ARG_CTX_SIZE=8192
+ENV LLAMA_ARG_CTX_SIZE=16384
 ENV LLAMA_ARG_PORT=8080
 ENV LLAMA_ARG_HOST=0.0.0.0
 

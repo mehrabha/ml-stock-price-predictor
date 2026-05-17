@@ -47,7 +47,7 @@ def get_semantics(row):
 def main():
     # --- 1. DATA DOWNLOAD PIPELINE ---
     tk = "AAPL"
-    start_dt = datetime(2024, 6, 1)
+    start_dt = datetime(2024, 5, 1)
     end_dt = datetime(2026, 4, 30)
     d = Dataset(tk, start_dt, end_dt)
 
@@ -55,12 +55,12 @@ def main():
     d.download_csvs()
     time.sleep(2)
 
-    # parse csvs into training
+    # train and validate price predictor using csvs
     # following params should be set based on available data, otherwise will result in index wrap arounds/exceptions
-    train_price_predictor(d, 
-        training_start_dt=datetime(2024, 10, 1),
-        training_end_dt=datetime(2025, 10, 31),
-        val_start_dt=datetime(2025, 11, 1),
+    price_predictor(d, 
+        training_start_dt=datetime(2024, 9, 1),
+        training_end_dt=datetime(2025, 8, 31),
+        val_start_dt=datetime(2025, 9, 1),
         val_end_dt=datetime(2026, 4, 30),
         hourly_lookback_days=5,
         daily_bars=21, 
@@ -69,11 +69,12 @@ def main():
         max_news_per_hr=3
     )
 
-    
+    # validate llm trading agent
 
-def train_price_predictor(d, training_start_dt, training_end_dt,
-                          val_start_dt, val_end_dt,
-                          hourly_lookback_days, daily_bars, weekly_bars, monthly_bars, max_news_per_hr):
+
+def price_predictor(d, training_start_dt, training_end_dt,
+                    val_start_dt, val_end_dt,
+                    hourly_lookback_days, daily_bars, weekly_bars, monthly_bars, max_news_per_hr):
     # --- 2. PREPARE TRAINING SET ---
     train_label = d.generate_training_dataset(
         training_start_dt,
@@ -153,6 +154,9 @@ def train_price_predictor(d, training_start_dt, training_end_dt,
     # --- 5. LIFT OFF! ---
     print("\n\n Commencing Training...")
     trainer.fit(epochs=20, tag="weights.pth")
+
+#def validate_llm_agent(d, start_date, end_date):
+
 
 if __name__ == "__main__":
     main()
