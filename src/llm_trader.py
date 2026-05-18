@@ -6,17 +6,14 @@ import src.api_client as polygon_api
 import json, requests
 
 class LLMStockTrader:
-    def __init__(self, starting_balance: int, max_trades_per_day=3):
+    def __init__(self, starting_balance: int, max_trades_per_day=3, mocks_enabled=False):
         # Portfolio
         self.cash_balance = starting_balance
         self.holdings = {}
         self.portfolio_val = starting_balance
         self.trade_history = []
-        self.action_summaries_week = []     #TODO update via action 5: reflection
-        self.action_summaries_month = []    #TODO
-
-        self.max_trades_per_day = max_trades_per_day
-        self.daily_trades_executed = 0
+        self.action_summaries_week = []
+        self.action_summaries_month = []
 
         self.llm_url = f"http://localhost:5000{os.getenv('BASE_PATH')}/chat"
         self.llm_auth = (os.getenv("APP_USER"), os.getenv('APP_PASS'))
@@ -46,21 +43,29 @@ class LLMStockTrader:
         weekly_start = (now - pd.DateOffset(weeks=weekly_bars + 2)).strftime("%Y-%m-%d")
         monthly_start = (now - pd.DateOffset(months=monthly_bars + 2)).strftime("%Y-%m-%d")
 
+        
         # Fetch live data
         try:
             df_hour = polygon_api.get_prices(ticker, "hour", hourly_start, end_date)
             df_day = polygon_api.get_prices(ticker, "day", daily_start, end_date)
             df_week = polygon_api.get_prices(ticker, "week", weekly_start, end_date)
             df_month = polygon_api.get_prices(ticker, "month", monthly_start, end_date)
-            df_news = polygon_api.get_news(ticker, hourly_start, end_date)
+            df_news = polygon_api.get_news(ticker, end_date, end_date)
         except Exception as e:
             raise Exception(f"Error invoking price APIs; cause:{e}")
 
-        # trim extra hours
+        # trim extra hours 
         if df_hour is not None and not df_hour.empty:
             df_hour = df_hour.set_index("eastern_dt")
             df_hour = df_hour.between_time("8:00", "18:00", inclusive="left")
             df_hour = df_hour.reset_index()
+
+        # prevent lookahead bias while validating against historical prices
+        df_hour = df_hour[df_hour["eastern_dt"] < now.floor('H')]
+        df_news = df_news[df_news["eastern_dt"].dt.hour.between(now.hour - 4, now.hour)]
+        df_day = df_day.iloc[:-1]
+        df_week = df_week.iloc[:-1]
+        df_month = df_month.iloc[:-1]
 
         if df_news is not None and not df_news.empty:
             df_news = df_news[["eastern_dt", "title", "publisher", "description"]].sort_values(by="eastern_dt")
@@ -104,7 +109,6 @@ class LLMStockTrader:
         - Current Holdings (Shares): {self.holdings}
         - Current Portfolio Value: ${self.portfolio_val}
         - Trade History: {self.trade_history[-trade_history:] if len(self.trade_history) >= trade_history else self.trade_history}
-        - Trades Executed Today: {self.daily_trades_executed}
         - Previous Action Summaries (Week): {self.action_summaries_week[-action_summaries:] if len(self.action_summaries_week) >= action_summaries else self.action_summaries_week}
         - Previous Action Summaries (Month): {self.action_summaries_month[-action_summaries:] if len(self.action_summaries_month) >= action_summaries else self.action_summaries_month}
         - Clock: {now}
@@ -128,7 +132,7 @@ class LLMStockTrader:
         return context, current_price
     
 
-    def reason(self, ticker: str, mkt_context: str, max_shares_per_trade:int) -> tuple[str, str]:
+    def reason(self, ticker: str, now: pd.Timestamp, mkt_context: str, max_shares_per_trade:int) -> tuple[str, str]:
         """
         Step 2: Make decision using LLMs
         """
@@ -139,20 +143,21 @@ class LLMStockTrader:
         system_prompt = (
             "You are an elite, purely logical quantitative AI used at a large firm. Your Goal: Maximize Returns while adhering to a medium-risk strategy! "
             "You have access to the market and are able to execute trades based on cash position and portfolio. "
-            "Analyze the provided market data, news, and portfolio content to make investment decisions for the given ticker. "
+            "Analyze the provided market data, news, portfolio content and summaries to make investment decisions for the given ticker. "
             f"For your response, you must output a single, valid JSON object containing your final decision regarding ticker={ticker}. "
             "The JSON must strictly match this format (use double quotes): "
             '{"action": "BUY | SELL | HOLD | ALERT", "ticker": "STRING | null", "shares": "INTEGER | null", "rationale": "STRING"} '
             f"You may BUY or SELL up to {max_shares_per_trade} shares in a single transaction based on portfolio constraints. "
-            f"You have the ability to make decisions every hour while the market is open. However, you are allowed a maximum of {self.max_trades_per_day} trades per day. "
-            "Your 'rationale' field should be a 2-3 sentence justification to guide your future decisions. Discuss what you learned, mention the source and justify your decision. "
+            f"You have the ability to make two decisions per day. The execution loop runs every business day at 10am, 2pm and 6pm. "
+            "Don't execute BUY/SELL during after-hours (6pm). Instead, use the time to analyze news articles and key events which can be used to guide future decisions. "
+            "Your 'rationale' field should be a 2-3 sentence justification to guide your future decisions. Discuss prices/news articles to justify your decision. "
             "After your <think> reasoning process, output ONLY the valid JSON object. Do not wrap it in markdown formatting or provide conversational text. "
             "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
         )
 
         payload = {
             "system_prompt": system_prompt,
-            "prompt": mkt_context,
+            "prompt": f"current_timestamp: {now}, mkt_context: {mkt_context}",
             "temperature": 0.1
         }
 
@@ -184,7 +189,7 @@ class LLMStockTrader:
             print(f"Error invoking LLM; exception={e}")
             raise e
     
-    def plan(self, tk: str, llm_outout_str: str, current_price: float, max_shares_per_trade: int) -> tuple[str, str, int, str]:
+    def plan(self, tk: str, now: pd.Timestamp, llm_outout_str: str, current_price: float, max_shares_per_trade: int) -> tuple[str, str, int, str]:
         """
         Step 3: Parse the LLM's JSON output, apply guardrails and determine whether the trade is valid
         """
@@ -214,9 +219,10 @@ class LLMStockTrader:
         if not shares or shares <= 0:
             raise Exception(f"shares=0/None for BUY/SELL actions")
         
-        # validate trade based on limits and available balances
-        if self.daily_trades_executed >= self.max_trades_per_day:
-            return "HOLD", ticker, shares, "Daily trading limit reached; Forcing a HOLD!"
+
+        # Force a HOLD for unapproved trades
+        if now.hour not in range(9, 16):
+            return "HOLD", ticker, shares, f"After hours trading detected, hour={now.hour}; Forcing a HOLD!"
         
         if shares > max_shares_per_trade:
             return "HOLD", ticker, shares, f"Share qty exceeded limit={max_shares_per_trade}; Forcing a HOLD!"
@@ -232,7 +238,7 @@ class LLMStockTrader:
         return action, ticker, shares, rationale
 
 
-    def execute(self, action: str, ticker: str, qty: int, current_price: float, rationale: str) -> float:
+    def execute(self, action: str, ticker: str, now: pd.Timestamp, qty: int, current_price: float, rationale: str) -> float:
         """
         Step 4: Execute the trade by invoking exchange API and update portfolio state.
         """
@@ -252,14 +258,12 @@ class LLMStockTrader:
             prix = qty * current_price
             self.cash_balance -= prix
             self.holdings[ticker] = self.holdings.get(ticker, 0) + qty
-            self.daily_trades_executed += 1
         elif action == "SELL":
             prix = qty * current_price
             self.cash_balance += prix
             self.holdings[ticker] = self.holdings.get(ticker, 0) - qty
             if self.holdings[ticker] == 0:
                 self.holdings.pop(ticker)
-            self.daily_trades_executed += 1
 
         # recalculate portfolio
         self.portfolio_val = self.cash_balance
@@ -350,18 +354,18 @@ class LLMStockTrader:
         else:
             print(f"[REFLECT] Initiating reflection for Month End {now.strftime('%Y-%m')}...")
 
-            print(f"[REFLECT] Sumarizing {len(self.trade_history)} trades...")
+            print(f"[REFLECT] Summarizing {len(self.trade_history)} trades...")
             history_text = '\n'.join(self.trade_history)
             weeky_summaries_txt = '\n'.join(self.action_summaries_week)
 
-            print(f"[REFLECT] Sumarizing {len(self.action_summaries_week)} summaries from prev weeks...")
+            print(f"[REFLECT] Summarizing {len(self.action_summaries_week)} summaries from prev weeks...")
 
             system_prompt = (
                 "You are an elite quantitative AI reflecting on your monthly trading performance. "
-                "Review the provided trade ledger + weekly summaries and output a 5-7 describing the trading month. "
+                "Review the provided trade ledger + weekly summaries and output 5-7 sentences describing the trading month. "
                 "Analyze the portfolio performance and see how it's doing. Did you make any gains? What went wrong? "
                 "Reflect on the market and your actions. Identify key wins/mistakes. " 
-                "Would would you adjust your trading strategy going forward? Leave a memo for your future self "
+                "How would you adjust your trading strategy going forward? Leave a memo for your future self "
                 f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
                 "The JSON must strictly match this format (use double quotes): "
                 '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
