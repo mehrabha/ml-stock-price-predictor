@@ -3,22 +3,23 @@ from datetime import datetime
 import pandas as pd
 import pandas_market_calendars as mkt_cal
 import src.api_client as polygon_api
-import requests
+import json, requests
 
 class LLMStockTrader:
     def __init__(self, starting_balance: int, max_trades_per_day=3):
         # Portfolio
         self.cash_balance = starting_balance
-        self.holdings = {"AAPL": 32}
-        self.trade_history = ["BUY AAPL 20", "BUY AAPL 12"]
-        self.action_summaries = ["Positive market sentiment, upward trend, and potential for growth driven by technology sector gains."]
+        self.holdings = {}
+        self.portfolio_val = starting_balance
+        self.trade_history = []
+        self.action_summaries_week = []     #TODO update via action 5: reflection
+        self.action_summaries_month = []    #TODO
 
         self.max_trades_per_day = max_trades_per_day
-        self.daily_trades_executed = 3
+        self.daily_trades_executed = 0
 
         self.llm_url = f"http://localhost:5000{os.getenv('BASE_PATH')}/chat"
         self.llm_auth = (os.getenv("APP_USER"), os.getenv('APP_PASS'))
-
 
     def observe(
             self, ticker: str, now: pd.Timestamp,
@@ -92,6 +93,8 @@ class LLMStockTrader:
 
         # latest price
         current_price = df_hour["close"].iloc[-1]
+        self.portfolio_val = self.cash_balance
+        self.portfolio_val += self.holdings[ticker] * current_price if ticker in self.holdings else 0   # TODO support multi stock portfolios
 
         # construct the final context payload
         context = f"""
@@ -99,9 +102,11 @@ class LLMStockTrader:
         - Current Price Per Share: {current_price}
         - Current Portfolio Cash: ${self.cash_balance:.2f}
         - Current Holdings (Shares): {self.holdings}
+        - Current Portfolio Value: ${self.portfolio_val}
         - Trade History: {self.trade_history[-trade_history:] if len(self.trade_history) >= trade_history else self.trade_history}
         - Trades Executed Today: {self.daily_trades_executed}
-        - Previous Action Summaries: {self.action_summaries[-action_summaries:] if len(self.action_summaries) >= action_summaries else self.action_summaries}
+        - Previous Action Summaries (Week): {self.action_summaries_week[-action_summaries:] if len(self.action_summaries_week) >= action_summaries else self.action_summaries_week}
+        - Previous Action Summaries (Month): {self.action_summaries_month[-action_summaries:] if len(self.action_summaries_month) >= action_summaries else self.action_summaries_month}
         - Clock: {now}
 
         ### Recent News
@@ -123,7 +128,7 @@ class LLMStockTrader:
         return context, current_price
     
 
-    def reason(self, mkt_context: str, max_shares_per_trade:int) -> dict:
+    def reason(self, ticker: str, mkt_context: str, max_shares_per_trade:int) -> tuple[str, str]:
         """
         Step 2: Make decision using LLMs
         """
@@ -135,12 +140,12 @@ class LLMStockTrader:
             "You are an elite, purely logical quantitative AI used at a large firm. Your Goal: Maximize Returns while adhering to a medium-risk strategy! "
             "You have access to the market and are able to execute trades based on cash position and portfolio. "
             "Analyze the provided market data, news, and portfolio content to make investment decisions for the given ticker. "
-            "For your response, you must output a single, valid JSON object containing your final decision. "
+            f"For your response, you must output a single, valid JSON object containing your final decision regarding ticker={ticker}. "
             "The JSON must strictly match this format (use double quotes): "
             '{"action": "BUY | SELL | HOLD | ALERT", "ticker": "STRING | null", "shares": "INTEGER | null", "rationale": "STRING"} '
             f"You may BUY or SELL up to {max_shares_per_trade} shares in a single transaction based on portfolio constraints. "
             f"You have the ability to make decisions every hour while the market is open. However, you are allowed a maximum of {self.max_trades_per_day} trades per day. "
-            "Your 'rationale' field should be a 1-2 sentence justification to guide your future decisions. Discuss what you learned and justify your decision. "
+            "Your 'rationale' field should be a 2-3 sentence justification to guide your future decisions. Discuss what you learned, mention the source and justify your decision. "
             "After your <think> reasoning process, output ONLY the valid JSON object. Do not wrap it in markdown formatting or provide conversational text. "
             "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
         )
@@ -163,20 +168,250 @@ class LLMStockTrader:
             response.raise_for_status()
             response_json = response.json()
 
-            message = response_json["choices"][0]["message"]
+            missing = []
+            for field in ["content", "reasoning", "usage"]:
+                if field not in response_json:
+                    missing.append(field)
 
-            final_content = message["content"].strip()
-            reasoning = message["reasoning_content"].strip()
-            usage = response_json["usage"]
-
+            if len(missing) > 0:
+                raise Exception(f"Required fields missing from LLM response: {missing}")
+            
             print("[REASON] Success! Recieved decision from LLM...")
-
-            return {
-                "content": final_content,
-                "reasoning": reasoning,
-                "usage": usage
-            }
+            print(f"[REASON] Metrics: {response_json["usage"]}")
+            return response_json
         
         except requests.exceptions.RequestException as e:
             print(f"Error invoking LLM; exception={e}")
             raise e
+    
+    def plan(self, tk: str, llm_outout_str: str, current_price: float, max_shares_per_trade: int) -> tuple[str, str, int, str]:
+        """
+        Step 3: Parse the LLM's JSON output, apply guardrails and determine whether the trade is valid
+        """
+
+        print("[PLAN] Processing LLM decision against portfolio...")
+
+        # parse the llm output
+        try:
+            decision = json.loads(llm_outout_str)
+            action = decision["action"]
+            ticker = decision["ticker"]
+            shares = decision["shares"] if action in ["BUY", "SELL"] else 0
+            rationale = decision.get("rationale")
+        except json.JSONDecodeError as e:
+            raise Exception("LLM failed to output valid JSON")
+        except KeyError as e:
+            raise Exception(f"Key missing in LLM output: {e}")
+
+
+        # apply guardrails
+        if ticker != tk:
+            raise Exception(f"Invalid ticker; expected={tk}; provided={ticker}")
+        if action in ["ALERT", "HOLD"]:
+            return "HOLD", ticker, shares, rationale
+        if action not in ["BUY", "SELL"]:
+            raise Exception(f"Invalid action by Agent: {action}")
+        if not shares or shares <= 0:
+            raise Exception(f"shares=0/None for BUY/SELL actions")
+        
+        # validate trade based on limits and available balances
+        if self.daily_trades_executed >= self.max_trades_per_day:
+            return "HOLD", ticker, shares, "Daily trading limit reached; Forcing a HOLD!"
+        
+        if shares > max_shares_per_trade:
+            return "HOLD", ticker, shares, f"Share qty exceeded limit={max_shares_per_trade}; Forcing a HOLD!"
+        
+        if action == "BUY" and shares * current_price > self.cash_balance:
+            return "HOLD", ticker, shares, f"Insufficient balance={self.cash_balance} to execute {action} {ticker} {shares}; Forcing a HOLD!"
+        
+        if action == "SELL" and (ticker not in self.holdings or shares > self.holdings[ticker]):
+            return "HOLD", ticker, shares, f"Unable to execute {action} {ticker} {shares}; current holdings={self.holdings}; Forcing a HOLD!"
+
+        print(f"[PLAN] Trade approved!! {action} {ticker} {shares} {rationale}")
+
+        return action, ticker, shares, rationale
+
+
+    def execute(self, action: str, ticker: str, qty: int, current_price: float, rationale: str) -> float:
+        """
+        Step 4: Execute the trade by invoking exchange API and update portfolio state.
+        """
+
+        if action not in ["BUY", "SELL", "HOLD"]:
+            raise Exception(f"Cannot execute trade; invalid action={action}")
+        
+        # TODO API call to exchange
+        if action in ["BUY", "SELL"]:
+            print(f"[EXECUTE] Invoking broker API for {action} {qty} {ticker} (Mocked atm!)...")
+        call_failed = False
+
+        if call_failed:
+            raise Exception("Broker rejected the trade...")
+        
+        if action == "BUY":
+            prix = qty * current_price
+            self.cash_balance -= prix
+            self.holdings[ticker] = self.holdings.get(ticker, 0) + qty
+            self.daily_trades_executed += 1
+        elif action == "SELL":
+            prix = qty * current_price
+            self.cash_balance += prix
+            self.holdings[ticker] = self.holdings.get(ticker, 0) - qty
+            if self.holdings[ticker] == 0:
+                self.holdings.pop(ticker)
+            self.daily_trades_executed += 1
+
+        # recalculate portfolio
+        self.portfolio_val = self.cash_balance
+        self.portfolio_val += self.holdings[ticker] * current_price if ticker in self.holdings else 0
+
+        self.trade_history.append(f"{pd.Timestamp.now().strftime('%Y-%m-%d')} portfolio_value:{self.portfolio_val}; {action} {ticker} {qty} @ {current_price:.2f}; rationale{rationale}")
+        
+        print(f"[EXECUTE] Success! New balance: ${self.cash_balance:.2f} | Holdings: {self.holdings}")
+        return self.portfolio_val
+    
+
+    def reflect(self, ticker:str, now: pd.Timestamp) -> tuple[str, str]:
+        """
+        Step 5: Invoke LLM, compresses trade history into high-level summaries.
+        """
+
+        if now.weekday() != 4:
+            raise Exception("[REFLECT] this method should only be invoked on Fridays!")
+
+        is_last_friday = (now + pd.Timedelta(days=7)).month != now.month    # generate month end summary
+
+        if not self.trade_history and not is_last_friday:
+            week_summary = f"Summary for Week Ending in {now.strftime('%Y-%m-%d')}: No trades were executed!"
+            self.action_summaries_week.append(week_summary)
+            return week_summary, "No trades to summarize..."
+        elif not self.trade_history and not self.action_summaries_week:
+            month_summary = f"Summary for Month {now.strftime('%Y-%m-%d')}: No trades were executed!"
+            self.action_summaries_month.append(month_summary)
+            return month_summary, "No trades to summarize..."
+        elif not is_last_friday:
+            print(f"[REFLECT] Initiating reflection for Week Ending in {now.strftime('%Y-%m-%d')}...")
+            print(f"[REFLECT] Sumarizing {len(self.trade_history)} trades...")
+            history_text = '\n'.join(self.trade_history)
+
+            system_prompt = (
+                "You are an elite quantitative AI reflecting on your weekly trading performance. "
+                "Review the provided trade ledger and output a 3-6 sentence summary of the trading week. "
+                "Reflect on the market and summarize what you've learned. "
+                f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
+                "The JSON must strictly match this format (use double quotes): "
+                '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
+                "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
+            )
+
+            print(f"[REFLECT] Market closed for the weekend. Initiating reflection for {ticker}...")
+
+            payload = {
+                "system_prompt": system_prompt,
+                "prompt": f"Trading Ledger:\n{history_text}",
+                "temperature": 0.1
+            }
+
+            try:
+                response = requests.post(
+                    self.llm_url,
+                    json=payload,
+                    auth=self.llm_auth,
+                    timeout=float(os.getenv("LLM_TIMEOUT"))
+                )
+
+                response.raise_for_status()
+                response_json = response.json()
+
+                missing = []
+                for field in ["content", "reasoning", "usage"]:
+                    if field not in response_json:
+                        missing.append(field)
+
+                if len(missing) > 0:
+                    raise Exception(f"Required fields missing from LLM response: {missing}")
+                
+                parsed_json = json.loads(response_json["content"])
+                action = parsed_json["action"]
+                message = parsed_json["message"]
+
+                if action == "ALERT":
+                    return action, message
+                
+                print("[REASON] Success! Recieved summary for week...")
+                print(f"[REASON] Metrics: {response_json['usage']}")
+
+                self.action_summaries_week.append(message)
+                self.trade_history.clear()
+                return message, response_json["reasoning"]
+            except requests.exceptions.RequestException as e:
+                print(f"Error invoking LLM; exception={e}")
+                raise e
+        else:
+            print(f"[REFLECT] Initiating reflection for Month End {now.strftime('%Y-%m')}...")
+
+            print(f"[REFLECT] Sumarizing {len(self.trade_history)} trades...")
+            history_text = '\n'.join(self.trade_history)
+            weeky_summaries_txt = '\n'.join(self.action_summaries_week)
+
+            print(f"[REFLECT] Sumarizing {len(self.action_summaries_week)} summaries from prev weeks...")
+
+            system_prompt = (
+                "You are an elite quantitative AI reflecting on your monthly trading performance. "
+                "Review the provided trade ledger + weekly summaries and output a 5-7 describing the trading month. "
+                "Analyze the portfolio performance and see how it's doing. Did you make any gains? What went wrong? "
+                "Reflect on the market and your actions. Identify key wins/mistakes. " 
+                "Would would you adjust your trading strategy going forward? Leave a memo for your future self "
+                f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
+                "The JSON must strictly match this format (use double quotes): "
+                '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
+                "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
+            )
+
+            print(f"[REFLECT] Market closed for the weekend. Initiating reflection for {ticker}...")
+
+            payload = {
+                "system_prompt": system_prompt,
+                "prompt": f"Trading Ledger:\n{history_text}\nWeekly Summaries:\n{weeky_summaries_txt}",
+                "temperature": 0.1
+            }
+
+            try:
+                response = requests.post(
+                    self.llm_url,
+                    json=payload,
+                    auth=self.llm_auth,
+                    timeout=float(os.getenv("LLM_TIMEOUT"))
+                )
+
+                response.raise_for_status()
+                response_json = response.json()
+
+                missing = []
+                for field in ["content", "reasoning", "usage"]:
+                    if field not in response_json:
+                        missing.append(field)
+
+                if len(missing) > 0:
+                    raise Exception(f"Required fields missing from LLM response: {missing}")
+                
+                parsed_json = json.loads(response_json["content"])
+                action = parsed_json["action"]
+                message = parsed_json["message"]
+
+                if action == "ALERT":
+                    return action, message
+                
+                print("[REASON] Success! Recieved summary for month...")
+                print(f"[REASON] Metrics: {response_json['usage']}")
+
+                self.action_summaries_month.append(message)
+                self.trade_history.clear()
+                self.action_summaries_week.clear()
+                return message, response_json["reasoning"]
+            except requests.exceptions.RequestException as e:
+                print(f"Error invoking LLM; exception={e}")
+                raise e
+        
+                
+            

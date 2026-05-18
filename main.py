@@ -85,7 +85,7 @@ def main():
     )
 
     print(context + '\n')
-    decision = agent.reason(context,max_shares_per_trade=10)
+    decision, reasoning = agent.reason(context,max_shares_per_trade=10)
     print(decision)
 
 def price_predictor(d, training_start_dt, training_end_dt,
