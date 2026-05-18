@@ -70,8 +70,17 @@ def main():
     #     max_news_per_hr=3
     # )
 
+    
+    simulation_dates = [
+        pd.Timestamp("2026-05-13 14:00:00", tz="US/Eastern"), # Wednesday
+        pd.Timestamp("2026-05-15 16:30:00", tz="US/Eastern"), # Friday
+        pd.Timestamp("2026-05-29 16:30:00", tz="US/Eastern")  # Last Friday
+    ]
+    
     # validate llm trading agent
-    agent = LLMStockTrader(starting_balance=1015, max_trades_per_day=3)
+    agent = LLMStockTrader(starting_balance=10000, max_trades_per_day=3)
+
+    
     context, current_price = agent.observe(
         ticker="AAPL",
         now = pd.Timestamp.now(tz="US/Eastern") - pd.DateOffset(days=3),
@@ -86,7 +95,7 @@ def main():
 
     print(context + '\n')
     decision, reasoning = agent.reason(context,max_shares_per_trade=10)
-    print(decision)
+    print(decision, reasoning)
 
 def price_predictor(d, training_start_dt, training_end_dt,
                     val_start_dt, val_end_dt,

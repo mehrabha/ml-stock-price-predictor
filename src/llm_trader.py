@@ -6,7 +6,7 @@ import src.api_client as polygon_api
 import json, requests
 
 class LLMStockTrader:
-    def __init__(self, starting_balance: int, max_trades_per_day=3, mocks_enabled=False):
+    def __init__(self, starting_balance: int, max_trades_per_day=3):
         # Portfolio
         self.cash_balance = starting_balance
         self.holdings = {}
@@ -43,8 +43,6 @@ class LLMStockTrader:
         weekly_start = (now - pd.DateOffset(weeks=weekly_bars + 2)).strftime("%Y-%m-%d")
         monthly_start = (now - pd.DateOffset(months=monthly_bars + 2)).strftime("%Y-%m-%d")
 
-        
-        # Fetch live data
         try:
             df_hour = polygon_api.get_prices(ticker, "hour", hourly_start, end_date)
             df_day = polygon_api.get_prices(ticker, "day", daily_start, end_date)
@@ -53,7 +51,7 @@ class LLMStockTrader:
             df_news = polygon_api.get_news(ticker, end_date, end_date)
         except Exception as e:
             raise Exception(f"Error invoking price APIs; cause:{e}")
-
+        
         # trim extra hours 
         if df_hour is not None and not df_hour.empty:
             df_hour = df_hour.set_index("eastern_dt")
@@ -269,7 +267,7 @@ class LLMStockTrader:
         self.portfolio_val = self.cash_balance
         self.portfolio_val += self.holdings[ticker] * current_price if ticker in self.holdings else 0
 
-        self.trade_history.append(f"{pd.Timestamp.now().strftime('%Y-%m-%d')} portfolio_value:{self.portfolio_val}; {action} {ticker} {qty} @ {current_price:.2f}; rationale{rationale}")
+        self.trade_history.append(f"{now.strftime('%Y-%m-%d')} portfolio_value:{self.portfolio_val}; {action} {ticker} {qty} @ {current_price:.2f}; rationale{rationale}")
         
         print(f"[EXECUTE] Success! New balance: ${self.cash_balance:.2f} | Holdings: {self.holdings}")
         return self.portfolio_val
