@@ -1,12 +1,11 @@
 import os
-from datetime import datetime
 import pandas as pd
 import pandas_market_calendars as mkt_cal
 import src.api_client as polygon_api
 import json, requests
 
 class LLMStockTrader:
-    def __init__(self, starting_balance: int, max_trades_per_day=3):
+    def __init__(self, starting_balance: int):
         # Portfolio
         self.cash_balance = starting_balance
         self.holdings = {}
@@ -35,7 +34,7 @@ class LLMStockTrader:
         mkt_days = mkt_days.tz_localize(None).tz_localize("US/Eastern").to_list()
 
         if now.normalize() not in mkt_days:
-            raise ValueError("Stock Market is closed today!")
+            raise ValueError("[OBSERVE] Stock Market is closed today!")
     
         # go back X trading days
         hourly_start = mkt_days[-(hourly_lookback_days + 1)].strftime("%Y-%m-%d")
@@ -50,7 +49,7 @@ class LLMStockTrader:
             df_month = polygon_api.get_prices(ticker, "month", monthly_start, end_date)
             df_news = polygon_api.get_news(ticker, end_date, end_date)
         except Exception as e:
-            raise Exception(f"Error invoking price APIs; cause:{e}")
+            raise Exception(f"[OBSERVE] Error invoking price APIs; cause:{e}")
         
         # trim extra hours 
         if df_hour is not None and not df_hour.empty:
@@ -59,7 +58,7 @@ class LLMStockTrader:
             df_hour = df_hour.reset_index()
 
         # prevent lookahead bias while validating against historical prices
-        df_hour = df_hour[df_hour["eastern_dt"] < now.floor('H')]
+        df_hour = df_hour[df_hour["eastern_dt"] < now.floor('h')]
         df_news = df_news[df_news["eastern_dt"].dt.hour.between(now.hour - 4, now.hour)]
         df_day = df_day.iloc[:-1]
         df_week = df_week.iloc[:-1]
@@ -67,7 +66,7 @@ class LLMStockTrader:
 
         if df_news is not None and not df_news.empty:
             df_news = df_news[["eastern_dt", "title", "publisher", "description"]].sort_values(by="eastern_dt")
-            md_news = df_news.tail(news_articles).to_markdown(index=False)
+            md_news = df_news.head(news_articles).to_markdown(index=False)
         else:
             md_news = f"No news found for window {hourly_start}:{now}!"
 
@@ -92,7 +91,7 @@ class LLMStockTrader:
             md_week = md_week.to_markdown(index=False)
             md_month = md_month.to_markdown(index=False)
         else:
-            raise ValueError(f"Insufficient data for {ticker}; API returned fewer price points...")
+            raise ValueError(f"[OBSERVE] Insufficient data for {ticker}; API returned fewer price points...")
 
         # latest price
         current_price = df_hour["close"].iloc[-1]
@@ -111,7 +110,7 @@ class LLMStockTrader:
         - Previous Action Summaries (Month): {self.action_summaries_month[-action_summaries:] if len(self.action_summaries_month) >= action_summaries else self.action_summaries_month}
         - Clock: {now}
 
-        ### Recent News
+        ### Recent News (Caution! News may be missing or irrelevant)
         {md_news}
 
         ### Hourly Price Action
@@ -127,10 +126,11 @@ class LLMStockTrader:
         {md_month}
         """
         
+        print("[OBSERVE] Success!\n")
         return context, current_price
     
 
-    def reason(self, ticker: str, now: pd.Timestamp, mkt_context: str, max_shares_per_trade:int) -> tuple[str, str]:
+    def reason(self, ticker: str, now: pd.Timestamp, mkt_context: str, max_shares_per_trade:int) -> dict:
         """
         Step 2: Make decision using LLMs
         """
@@ -146,17 +146,18 @@ class LLMStockTrader:
             "The JSON must strictly match this format (use double quotes): "
             '{"action": "BUY | SELL | HOLD | ALERT", "ticker": "STRING | null", "shares": "INTEGER | null", "rationale": "STRING"} '
             f"You may BUY or SELL up to {max_shares_per_trade} shares in a single transaction based on portfolio constraints. "
-            f"You have the ability to make two decisions per day. The execution loop runs every business day at 10am, 2pm and 6pm. "
-            "Don't execute BUY/SELL during after-hours (6pm). Instead, use the time to analyze news articles and key events which can be used to guide future decisions. "
-            "Your 'rationale' field should be a 2-3 sentence justification to guide your future decisions. Discuss prices/news articles to justify your decision. "
-            "After your <think> reasoning process, output ONLY the valid JSON object. Do not wrap it in markdown formatting or provide conversational text. "
-            "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
+            f"You have the ability to make two decisions per day. The execution loop runs every business day at 10:00, 14:00 and 18:00. "
+            "Don't execute BUY/SELL during after-hours (post 18:00). Instead, use the time to analyze news articles and key events which can be used to guide future decisions. "
+            "Your 'rationale' field should be a 1-3 sentence justification to guide your future decisions. Discuss prices/news articles to justify your decision. "
+            "IMPORTANT: Output ONLY the valid JSON object. Do not wrap it in markdown formatting, extra tags (eg. ```json) or provide conversational text. "
+            "Use the ALERT action to communicate technical/data issues ONLY. Good Luck! "
         )
 
         payload = {
             "system_prompt": system_prompt,
             "prompt": f"current_timestamp: {now}, mkt_context: {mkt_context}",
-            "temperature": 0.1
+            "temperature": 0.1,
+            "cache_prompt": False
         }
 
         # Invoke the local LLM docker container
@@ -165,7 +166,7 @@ class LLMStockTrader:
                 self.llm_url,
                 json=payload,
                 auth=self.llm_auth,
-                timeout=float(os.getenv("LLM_TIMEOUT"))
+                timeout=float(os.getenv("LLM_TIMEOUT")),
             )
 
             response.raise_for_status()
@@ -177,14 +178,14 @@ class LLMStockTrader:
                     missing.append(field)
 
             if len(missing) > 0:
-                raise Exception(f"Required fields missing from LLM response: {missing}")
+                raise Exception(f"[REASON] Required fields missing from LLM response: {missing}")
             
             print("[REASON] Success! Recieved decision from LLM...")
-            print(f"[REASON] Metrics: {response_json["usage"]}")
+            print(f"[REASON] Metrics: {response_json['usage']}\n")
             return response_json
         
         except requests.exceptions.RequestException as e:
-            print(f"Error invoking LLM; exception={e}")
+            print(f"[REASON] Error invoking LLM; exception={e}")
             raise e
     
     def plan(self, tk: str, now: pd.Timestamp, llm_outout_str: str, current_price: float, max_shares_per_trade: int) -> tuple[str, str, int, str]:
@@ -196,26 +197,29 @@ class LLMStockTrader:
 
         # parse the llm output
         try:
-            decision = json.loads(llm_outout_str)
+            decision = json.loads(llm_outout_str.strip())
             action = decision["action"]
             ticker = decision["ticker"]
             shares = decision["shares"] if action in ["BUY", "SELL"] else 0
             rationale = decision.get("rationale")
         except json.JSONDecodeError as e:
-            raise Exception("LLM failed to output valid JSON")
+            raise Exception("[PLAN] LLM failed to output valid JSON")
         except KeyError as e:
-            raise Exception(f"Key missing in LLM output: {e}")
+            raise Exception(f"[PLAN] Key missing in LLM output: {e}")
+        except Exception as e:
+            raise Exception(f"[PLAN] Error: {e.with_traceback}")
 
 
         # apply guardrails
         if ticker != tk:
-            raise Exception(f"Invalid ticker; expected={tk}; provided={ticker}")
-        if action in ["ALERT", "HOLD"]:
+            raise Exception(f"[PLAN] Invalid ticker; expected={tk}; provided={ticker}")
+        if action == "ALERT":
+            print(f"[PLAN] Warning! LLM sent an ALERT! {action} {rationale}")
             return "HOLD", ticker, shares, rationale
-        if action not in ["BUY", "SELL"]:
-            raise Exception(f"Invalid action by Agent: {action}")
-        if not shares or shares <= 0:
-            raise Exception(f"shares=0/None for BUY/SELL actions")
+        if action not in ["BUY", "SELL", "HOLD"]:
+            raise Exception(f"[PLAN] Invalid action by Agent: {action}")
+        if action in ["BUY", "SELL"] and (not shares or shares <= 0):
+            raise Exception(f"[PLAN] Shares qty is 0/None for BUY/SELL actions")
         
 
         # Force a HOLD for unapproved trades
@@ -231,7 +235,7 @@ class LLMStockTrader:
         if action == "SELL" and (ticker not in self.holdings or shares > self.holdings[ticker]):
             return "HOLD", ticker, shares, f"Unable to execute {action} {ticker} {shares}; current holdings={self.holdings}; Forcing a HOLD!"
 
-        print(f"[PLAN] Trade approved!! {action} {ticker} {shares} {rationale}")
+        print(f"[PLAN] Trade approved!! {action} {ticker} {shares} {rationale} \n")
 
         return action, ticker, shares, rationale
 
@@ -242,7 +246,7 @@ class LLMStockTrader:
         """
 
         if action not in ["BUY", "SELL", "HOLD"]:
-            raise Exception(f"Cannot execute trade; invalid action={action}")
+            raise Exception(f"[EXECUTE] Cannot execute trade; invalid action={action}")
         
         # TODO API call to exchange
         if action in ["BUY", "SELL"]:
@@ -250,7 +254,7 @@ class LLMStockTrader:
         call_failed = False
 
         if call_failed:
-            raise Exception("Broker rejected the trade...")
+            raise Exception("[EXECUTE] Broker rejected the trade...")
         
         if action == "BUY":
             prix = qty * current_price
@@ -267,9 +271,9 @@ class LLMStockTrader:
         self.portfolio_val = self.cash_balance
         self.portfolio_val += self.holdings[ticker] * current_price if ticker in self.holdings else 0
 
-        self.trade_history.append(f"{now.strftime('%Y-%m-%d')} portfolio_value:{self.portfolio_val}; {action} {ticker} {qty} @ {current_price:.2f}; rationale{rationale}")
+        self.trade_history.append(f"{now.strftime('%Y-%m-%d')} portfolio_value:{self.portfolio_val}; '{action} {ticker} {qty}' @ {current_price:.2f}; rationale:'{rationale}'")
         
-        print(f"[EXECUTE] Success! New balance: ${self.cash_balance:.2f} | Holdings: {self.holdings}")
+        print(f"[EXECUTE] Success! New balance: ${self.cash_balance:.2f} | Holdings: {self.holdings} \n")
         return self.portfolio_val
     
 
@@ -299,11 +303,12 @@ class LLMStockTrader:
             system_prompt = (
                 "You are an elite quantitative AI reflecting on your weekly trading performance. "
                 "Review the provided trade ledger and output a 3-6 sentence summary of the trading week. "
-                "Reflect on the market and summarize what you've learned. "
+                "Reflect on the market and summarize what you've learned. Did you make any decisions to BUY or SELL?"
                 f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
                 "The JSON must strictly match this format (use double quotes): "
                 '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
-                "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
+                "IMPORTANT: Output ONLY the valid JSON object. Do not wrap it in markdown formatting, extra tags (eg. ```json) or provide conversational text. "
+                "Use the ALERT action to communicate technical/data issues ONLY with a message. Good Luck! "
             )
 
             print(f"[REFLECT] Market closed for the weekend. Initiating reflection for {ticker}...")
@@ -311,7 +316,8 @@ class LLMStockTrader:
             payload = {
                 "system_prompt": system_prompt,
                 "prompt": f"Trading Ledger:\n{history_text}",
-                "temperature": 0.1
+                "temperature": 0.1,
+                "cache_prompt": False
             }
 
             try:
@@ -331,24 +337,24 @@ class LLMStockTrader:
                         missing.append(field)
 
                 if len(missing) > 0:
-                    raise Exception(f"Required fields missing from LLM response: {missing}")
+                    raise Exception(f"[REFLECT] Required fields missing from LLM response: {missing}")
                 
-                parsed_json = json.loads(response_json["content"])
+                parsed_json = json.loads(response_json["content"].strip())
                 action = parsed_json["action"]
                 message = parsed_json["message"]
 
                 if action == "ALERT":
+                    print(f"[REFLECT] Warning! LLM sent an ALERT! {action} {message}")
                     return action, message
                 
-                print("[REASON] Success! Recieved summary for week...")
-                print(f"[REASON] Metrics: {response_json['usage']}")
+                print("[REFLECT] Success! Recieved summary for week...")
+                print(f"[REFLECT] Metrics: {response_json['usage']}\n")
 
                 self.action_summaries_week.append(message)
                 self.trade_history.clear()
                 return message, response_json["reasoning"]
             except requests.exceptions.RequestException as e:
-                print(f"Error invoking LLM; exception={e}")
-                raise e
+                raise Exception(f"[REFLECT] Error invoking LLM; exception={e}")
         else:
             print(f"[REFLECT] Initiating reflection for Month End {now.strftime('%Y-%m')}...")
 
@@ -367,7 +373,8 @@ class LLMStockTrader:
                 f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
                 "The JSON must strictly match this format (use double quotes): "
                 '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
-                "In case of issues, use the ALERT action to communicate anything urgent. Good Luck! "
+                "IMPORTANT: Output ONLY the valid JSON object. Do not wrap it in markdown formatting, extra tags (eg. ```json) or provide conversational text. "
+                "Use the ALERT action to communicate technical/data issues ONLY with a message. Good Luck! "
             )
 
             print(f"[REFLECT] Market closed for the weekend. Initiating reflection for {ticker}...")
@@ -375,7 +382,8 @@ class LLMStockTrader:
             payload = {
                 "system_prompt": system_prompt,
                 "prompt": f"Trading Ledger:\n{history_text}\nWeekly Summaries:\n{weeky_summaries_txt}",
-                "temperature": 0.1
+                "temperature": 0.1,
+                "cache_prompt": False
             }
 
             try:
@@ -395,24 +403,25 @@ class LLMStockTrader:
                         missing.append(field)
 
                 if len(missing) > 0:
-                    raise Exception(f"Required fields missing from LLM response: {missing}")
+                    raise Exception(f"[REFLECT] Required fields missing from LLM response: {missing}")
                 
-                parsed_json = json.loads(response_json["content"])
+                parsed_json = json.loads(response_json["content"].strip())
                 action = parsed_json["action"]
                 message = parsed_json["message"]
 
                 if action == "ALERT":
+                    print(f"[REFLECT] Warning! LLM sent an ALERT! {action} {message}")
                     return action, message
                 
-                print("[REASON] Success! Recieved summary for month...")
-                print(f"[REASON] Metrics: {response_json['usage']}")
+                print("[REFLECT] Success! Recieved summary for month...")
+                print(f"[REFLECT] Metrics: {response_json['usage']} \n")
 
                 self.action_summaries_month.append(message)
                 self.trade_history.clear()
                 self.action_summaries_week.clear()
                 return message, response_json["reasoning"]
             except requests.exceptions.RequestException as e:
-                print(f"Error invoking LLM; exception={e}")
+                print(f"[REFLECT] Error invoking LLM; exception={e}")
                 raise e
         
                 

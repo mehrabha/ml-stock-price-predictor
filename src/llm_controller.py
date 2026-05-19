@@ -25,6 +25,7 @@ class ChatRequest(BaseModel):
     prompt: str
     system_prompt: str = "You are quantitative trading AI"
     temperature: float = .3
+    cache_prompt: bool
 
 @router.post("/start")
 async def start_llm(user: str = Depends(authenticate)):
@@ -36,7 +37,7 @@ async def start_llm(user: str = Depends(authenticate)):
     except docker.errors.ImageNotFound:
         try:
             print(f"LLM image not found. Building from Dockerfile...")
-        
+
             docker_client.images.build(os.getcwd(), tag=IMAGE_NAME, rm=True)
             print("Build complete.")
         except docker.errors.BuildError as e:
@@ -83,7 +84,8 @@ async def chat(request: ChatRequest, user: str = Depends(authenticate)):
             {"role": "system", "content": request.system_prompt},
             {"role": "user", "content": request.prompt}
         ],
-        "temperature": request.temperature
+        "temperature": request.temperature,
+        "cache_prompt": request.cache_prompt
     }
 
     async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as http_client:    

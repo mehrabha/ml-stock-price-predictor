@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 import time
+import traceback
 from torch.utils.data import DataLoader
 
 from src.dataset import Dataset
@@ -71,31 +72,99 @@ def main():
     # )
 
     
-    simulation_dates = [
-        pd.Timestamp("2026-05-13 14:00:00", tz="US/Eastern"), # Wednesday
-        pd.Timestamp("2026-05-15 16:30:00", tz="US/Eastern"), # Friday
-        pd.Timestamp("2026-05-29 16:30:00", tz="US/Eastern")  # Last Friday
+    dates = [
+        pd.Timestamp("2026-04-15", tz="US/Eastern"), # wednesday
+        pd.Timestamp("2026-04-17", tz="US/Eastern"), # friday
+        pd.Timestamp("2026-04-22", tz="US/Eastern"), # wednesday
+        pd.Timestamp("2026-04-24", tz="US/Eastern")  # last friday of the month
     ]
     
+    trade_simulations = []
+
+    for date in dates:
+        trade_simulations.append(date.replace(hour=14))
+        trade_simulations.append(date.replace(hour=18))
+
     # validate llm trading agent
-    agent = LLMStockTrader(starting_balance=10000, max_trades_per_day=3)
+    ticker = "AAPL"
+    agent = LLMStockTrader(starting_balance=10000)
+    portfolio_values = [10000]
+    baseline = [10000]
 
-    
-    context, current_price = agent.observe(
-        ticker="AAPL",
-        now = pd.Timestamp.now(tz="US/Eastern") - pd.DateOffset(days=3),
-        hourly_lookback_days=2,
-        daily_bars=10,
-        weekly_bars=6,
-        monthly_bars=4,
-        news_articles=4,
-        trade_history=20,
-        action_summaries=10
-    )
+    for trade_simulation_dt in trade_simulations:
+        print(f"..........Simulating trade for time={trade_simulation_dt} : BEGIN..........")
 
-    print(context + '\n')
-    decision, reasoning = agent.reason(context,max_shares_per_trade=10)
-    print(decision, reasoning)
+
+        try:
+            # STEP 1: Fetch prices and news articles
+            context, current_price = agent.observe(
+                ticker=ticker,
+                now = trade_simulation_dt,
+                hourly_lookback_days=2,
+                daily_bars=10,
+                weekly_bars=6,
+                monthly_bars=4,
+                news_articles=4,
+                trade_history=20,
+                action_summaries=5
+            )
+
+            print(context + '\n\n')
+            time.sleep(1)
+
+            # STEP 2: Invoke LLM for a trading decision
+            decision = agent.reason(
+                ticker=ticker,
+                now=trade_simulation_dt,
+                mkt_context=context,
+                max_shares_per_trade=10
+            )
+
+            print(decision, end='\n\n', flush=True)
+            time.sleep(1)
+
+            # STEP 3: Validate Trade and prepare to publish
+            action, ticker, shares, rationale = agent.plan(
+                tk=ticker,
+                now=trade_simulation_dt,
+                llm_outout_str=decision["content"],
+                current_price=current_price,
+                max_shares_per_trade=10
+            )
+
+            time.sleep(2)
+
+            # STEP 4: Execute Trade
+            portfolio_value = agent.execute(
+                action=action,
+                ticker=tk,
+                now=trade_simulation_dt,
+                qty=shares, 
+                current_price=current_price,
+                rationale=rationale
+            )
+
+            time.sleep(2)
+
+            # STEP 5: Reflection/Summarize
+            if trade_simulation_dt.weekday() == 4 and trade_simulation_dt.hour >= 18:
+                msg, reasoning = agent.reflect(
+                    ticker=ticker,
+                    now=trade_simulation_dt
+                )
+
+                print(msg, reasoning)
+            time.sleep(4)
+
+        except Exception as e:
+            print(f"Exception occured during execution loop for {trade_simulation_dt}; {e}..........")
+            traceback.print_exc()
+            print("Continuing...")
+        finally:
+            print(f"..........{trade_simulation_dt} : END..........\n")
+
+
+        
 
 def price_predictor(d, training_start_dt, training_end_dt,
                     val_start_dt, val_end_dt,
