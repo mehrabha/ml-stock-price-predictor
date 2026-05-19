@@ -21,7 +21,7 @@ class LLMStockTrader:
             self, ticker: str, now: pd.Timestamp,
             hourly_lookback_days: int, daily_bars: int, 
             weekly_bars: int, monthly_bars: int, news_articles: int,
-            trade_history: int, action_summaries: int) -> tuple[str, float]:
+            trade_history: int, action_summaries: int, baseline_metrics: str = None) -> tuple[str, float]:
         """
         Step 1: Fetch live prices and news
         """
@@ -59,38 +59,54 @@ class LLMStockTrader:
 
         # prevent lookahead bias while validating against historical prices
         df_hour = df_hour[df_hour["eastern_dt"] < now.floor('h')]
-        df_news = df_news[df_news["eastern_dt"].dt.hour.between(now.hour - 4, now.hour)]
         df_day = df_day.iloc[:-1]
         df_week = df_week.iloc[:-1]
         df_month = df_month.iloc[:-1]
 
         if df_news is not None and not df_news.empty:
+            df_news = df_news[df_news["eastern_dt"].dt.hour.between(now.hour - 7, now.hour - 1)]    # prevent lookahead
             df_news = df_news[["eastern_dt", "title", "publisher", "description"]].sort_values(by="eastern_dt")
-            md_news = df_news.head(news_articles).to_markdown(index=False)
+            df_news = df_news.sample(news_articles) if len(df_news) >= news_articles else df_news
+            df_news = df_news.sort_values(by="eastern_dt")
+            df_news["eastern_dt"] = df_news["eastern_dt"].astype(str)
+            news = df_news.to_dict("records")
         else:
-            md_news = f"No news found for window {hourly_start}:{now}!"
+            news = [f"No news found for window {hourly_start}:{now}!"]
 
-        # filter out unnecessary data and save as markdown
-        cols = ["eastern_dt", "close", "volume"]
-        md_hr = df_hour[cols].tail(hourly_lookback_days * 10)
-        md_day = df_day[cols].tail(daily_bars)
-        md_week = df_week[cols].tail(weekly_bars)
-        md_month = df_month[cols].tail(monthly_bars)
+        # Cast dates to strings so the dictionary output is clean
+        df_hour["eastern_dt"] = df_hour["eastern_dt"].astype(str)
+        df_day["eastern_dt"] = df_day["eastern_dt"].astype(str)
+        df_week["eastern_dt"] = df_week["eastern_dt"].astype(str)
+        df_month["eastern_dt"] = df_month["eastern_dt"].astype(str)
+
+        # Convert Volume to M (Millions)
+        df_hour["volume"] = (df_hour["volume"] / 1e6).round(1).astype(str) + "M"
+        df_day["volume"] = (df_day["volume"] / 1e6).round(1).astype(str) + "M"
+        df_week["volume"] = (df_week["volume"] / 1e6).round(1).astype(str) + "M"
+        df_month["volume"] = (df_month["volume"] / 1e6).round(1).astype(str) + "M"
+            
+        # filter out unnecessary data and save as markdown and save as dict
+        cols = ["eastern_dt", "open", "high", "close", "volume"]
+        hour = df_hour[cols].tail(hourly_lookback_days * 10).to_dict("records")
+        day = df_day[cols].tail(daily_bars).to_dict("records")
+        week = df_week[cols].tail(weekly_bars).to_dict("records")
+        month = df_month[cols].tail(monthly_bars).to_dict("records")
+
+        news_str = '\n'.join(str(row) for row in news)
+        hour_str = '\n'.join(str(row) for row in hour)
+        day_str = '\n'.join(str(row) for row in day)
+        week_str = '\n'.join(str(row) for row in week)
+        month_str = '\n'.join(str(row) for row in month)
 
         # check if we were able to fetch the required data
         status = (
-            len(md_hr) == hourly_lookback_days * 10 and
-            len(md_day) == daily_bars and
-            len(md_week) == weekly_bars and
-            len(md_month) == monthly_bars
+            len(hour) == hourly_lookback_days * 10 and
+            len(day) == daily_bars and
+            len(week) == weekly_bars and
+            len(month) == monthly_bars
         )
 
-        if status:
-            md_hr = md_hr.to_markdown(index=False)
-            md_day = md_day.to_markdown(index=False)
-            md_week = md_week.to_markdown(index=False)
-            md_month = md_month.to_markdown(index=False)
-        else:
+        if not status:
             raise ValueError(f"[OBSERVE] Insufficient data for {ticker}; API returned fewer price points...")
 
         # latest price
@@ -101,29 +117,30 @@ class LLMStockTrader:
         # construct the final context payload
         context = f"""
         **Current Market State for {ticker}**
+        - Market Time: {now} ({"Regular Hours" if now.hour in range(9, 16) else "After Hours"})
         - Current Price Per Share: {current_price}
-        - Current Portfolio Cash: ${self.cash_balance:.2f}
         - Current Holdings (Shares): {self.holdings}
-        - Current Portfolio Value: ${self.portfolio_val}
-        - Trade History: {self.trade_history[-trade_history:] if len(self.trade_history) >= trade_history else self.trade_history}
-        - Previous Action Summaries (Week): {self.action_summaries_week[-action_summaries:] if len(self.action_summaries_week) >= action_summaries else self.action_summaries_week}
-        - Previous Action Summaries (Month): {self.action_summaries_month[-action_summaries:] if len(self.action_summaries_month) >= action_summaries else self.action_summaries_month}
-        - Clock: {now}
+        - Current Portfolio Cash: ${self.cash_balance:.2f}
+        - Current Portfolio Total Value: ${self.portfolio_val:.2f}
+        - Baseline Metrics: {baseline_metrics if baseline_metrics else "not provided"}
+        - Trade History: [{'\n-'.join(self.trade_history[-trade_history:]) if len(self.trade_history) >= trade_history else '\n-'.join(self.trade_history)}]
+        - Previous Action Summaries (Week): [{'\n-'.join(self.action_summaries_week[-action_summaries:]) if len(self.action_summaries_week) >= action_summaries else '\n-'.join(self.action_summaries_week)}]
+        - Previous Action Summaries (Month): [{'\n-'.join(self.action_summaries_month[-action_summaries:]) if len(self.action_summaries_month) >= action_summaries else '\n-'.join(self.action_summaries_month)}]
 
         ### Recent News (Caution! News may be missing or irrelevant)
-        {md_news}
+        {news_str}
 
         ### Hourly Price Action
-        {md_hr}
+        {hour_str}
 
         ### Daily Trend
-        {md_day}
+        {day_str}
 
         ### Weekly Structure
-        {md_week}
+        {week_str}
 
         ### Macro View
-        {md_month}
+        {month_str}
         """
         
         print("[OBSERVE] Success!\n")
@@ -139,16 +156,16 @@ class LLMStockTrader:
 
 
         system_prompt = (
-            "You are an elite, purely logical quantitative AI used at a large firm. Your Goal: Maximize Returns while adhering to a medium-risk strategy! "
+            "You are an elite, purely logical quantitative AI used at a large firm. Your Goal: Beat the baseline and generate returns while adhering to a medium-risk strategy! "
             "You have access to the market and are able to execute trades based on cash position and portfolio. "
             "Analyze the provided market data, news, portfolio content and summaries to make investment decisions for the given ticker. "
             f"For your response, you must output a single, valid JSON object containing your final decision regarding ticker={ticker}. "
             "The JSON must strictly match this format (use double quotes): "
-            '{"action": "BUY | SELL | HOLD | ALERT", "ticker": "STRING | null", "shares": "INTEGER | null", "rationale": "STRING"} '
+            '{"action": "BUY | SELL | HOLD | ALERT", "ticker": "STRING", "shares": "INTEGER | null", "rationale": "STRING"} '
             f"You may BUY or SELL up to {max_shares_per_trade} shares in a single transaction based on portfolio constraints. "
-            f"You have the ability to make two decisions per day. The execution loop runs every business day at 10:00, 14:00 and 18:00. "
-            "Don't execute BUY/SELL during after-hours (post 18:00). Instead, use the time to analyze news articles and key events which can be used to guide future decisions. "
-            "Your 'rationale' field should be a 1-3 sentence justification to guide your future decisions. Discuss prices/news articles to justify your decision. "
+            f"You have the ability to make one decision per day. The execution loop runs every business day at 12:00 and 18:00. "
+            "Don't execute BUY/SELL during after hours (18:00). Instead, decide HOLD and use the time to analyze prices/news events. "
+            "Your 'rationale' field should be a MAX 1-3 sentence summary of your trade or market research. "
             "IMPORTANT: Output ONLY the valid JSON object. Do not wrap it in markdown formatting, extra tags (eg. ```json) or provide conversational text. "
             "Use the ALERT action to communicate technical/data issues ONLY. Good Luck! "
         )
@@ -202,12 +219,15 @@ class LLMStockTrader:
             ticker = decision["ticker"]
             shares = decision["shares"] if action in ["BUY", "SELL"] else 0
             rationale = decision.get("rationale")
+
+            if rationale and len(rationale) > 500:
+                rationale = rationale[:500] + "...truncated"
         except json.JSONDecodeError as e:
             raise Exception("[PLAN] LLM failed to output valid JSON")
         except KeyError as e:
             raise Exception(f"[PLAN] Key missing in LLM output: {e}")
         except Exception as e:
-            raise Exception(f"[PLAN] Error: {e.with_traceback}")
+            raise Exception(f"[PLAN] Error: {e}")
 
 
         # apply guardrails
@@ -223,7 +243,7 @@ class LLMStockTrader:
         
 
         # Force a HOLD for unapproved trades
-        if now.hour not in range(9, 16):
+        if now.hour not in range(9, 16) and action != "HOLD":
             return "HOLD", ticker, shares, f"After hours trading detected, hour={now.hour}; Forcing a HOLD!"
         
         if shares > max_shares_per_trade:
@@ -235,7 +255,7 @@ class LLMStockTrader:
         if action == "SELL" and (ticker not in self.holdings or shares > self.holdings[ticker]):
             return "HOLD", ticker, shares, f"Unable to execute {action} {ticker} {shares}; current holdings={self.holdings}; Forcing a HOLD!"
 
-        print(f"[PLAN] Trade approved!! {action} {ticker} {shares} {rationale} \n")
+        print(f"[PLAN] Trade approved!! {action} {ticker} @ {shares} \n")
 
         return action, ticker, shares, rationale
 
@@ -271,7 +291,7 @@ class LLMStockTrader:
         self.portfolio_val = self.cash_balance
         self.portfolio_val += self.holdings[ticker] * current_price if ticker in self.holdings else 0
 
-        self.trade_history.append(f"{now.strftime('%Y-%m-%d')} portfolio_value:{self.portfolio_val}; '{action} {ticker} {qty}' @ {current_price:.2f}; rationale:'{rationale}'")
+        self.trade_history.append(f"{now.strftime('%Y-%m-%d')} portfolio_value: ${self.portfolio_val:.2f}; '{action} {ticker} {qty}' @ {current_price:.2f}; rationale:'{rationale}'")
         
         print(f"[EXECUTE] Success! New balance: ${self.cash_balance:.2f} | Holdings: {self.holdings} \n")
         return self.portfolio_val
@@ -306,7 +326,7 @@ class LLMStockTrader:
                 "Reflect on the market and summarize what you've learned. Did you make any decisions to BUY or SELL?"
                 f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
                 "The JSON must strictly match this format (use double quotes): "
-                '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
+                '{"action": "REFLECT | ALERT", "ticker": "STRING", "message": "STRING"} '
                 "IMPORTANT: Output ONLY the valid JSON object. Do not wrap it in markdown formatting, extra tags (eg. ```json) or provide conversational text. "
                 "Use the ALERT action to communicate technical/data issues ONLY with a message. Good Luck! "
             )
@@ -341,7 +361,7 @@ class LLMStockTrader:
                 
                 parsed_json = json.loads(response_json["content"].strip())
                 action = parsed_json["action"]
-                message = parsed_json["message"]
+                message = parsed_json["message"][:1000]
 
                 if action == "ALERT":
                     print(f"[REFLECT] Warning! LLM sent an ALERT! {action} {message}")
@@ -350,7 +370,7 @@ class LLMStockTrader:
                 print("[REFLECT] Success! Recieved summary for week...")
                 print(f"[REFLECT] Metrics: {response_json['usage']}\n")
 
-                self.action_summaries_week.append(message)
+                self.action_summaries_week.append(f"Summary for weekend={now} : {message}")
                 self.trade_history.clear()
                 return message, response_json["reasoning"]
             except requests.exceptions.RequestException as e:
@@ -372,7 +392,7 @@ class LLMStockTrader:
                 "How would you adjust your trading strategy going forward? Leave a memo for your future self "
                 f"For your response, you must output a single, valid JSON object containing your final analysis for ticker={ticker} as 'message'. "
                 "The JSON must strictly match this format (use double quotes): "
-                '{"action": "REFLECT | ALERT", "ticker": "STRING | null", "message": "STRING"} '
+                '{"action": "REFLECT | ALERT", "ticker": "STRING", "message": "STRING"} '
                 "IMPORTANT: Output ONLY the valid JSON object. Do not wrap it in markdown formatting, extra tags (eg. ```json) or provide conversational text. "
                 "Use the ALERT action to communicate technical/data issues ONLY with a message. Good Luck! "
             )
@@ -407,7 +427,7 @@ class LLMStockTrader:
                 
                 parsed_json = json.loads(response_json["content"].strip())
                 action = parsed_json["action"]
-                message = parsed_json["message"]
+                message = parsed_json["message"][:1500]
 
                 if action == "ALERT":
                     print(f"[REFLECT] Warning! LLM sent an ALERT! {action} {message}")
@@ -416,7 +436,7 @@ class LLMStockTrader:
                 print("[REFLECT] Success! Recieved summary for month...")
                 print(f"[REFLECT] Metrics: {response_json['usage']} \n")
 
-                self.action_summaries_month.append(message)
+                self.action_summaries_month.append(f"Summary for month-end={now.month}/{now.day} : {message}")
                 self.trade_history.clear()
                 self.action_summaries_week.clear()
                 return message, response_json["reasoning"]

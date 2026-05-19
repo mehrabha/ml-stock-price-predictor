@@ -144,7 +144,7 @@ def invoke_apis(base_url, params, api_key) -> list:
         current_url = response_json.get("next_url")
 
         # allow up to x calls per minute
-        time.sleep(1)
+        #time.sleep(1)
     print('\n')
 
     return results
